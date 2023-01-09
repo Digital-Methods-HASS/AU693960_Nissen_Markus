@@ -1,0 +1,420 @@
+---
+title: "Sentiment analysis Mckay"
+author: "Markus Lange-Kornbak Nissen"
+date: "Created 2022-12-10, last edited 2023-01-09 "
+output: html_document
+---
+
+# Setup
+## Packages
+
+Loading the needed packages for running the analysis
+```{r setup, eval=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(here)
+library(pdftools)
+library(tidytext)
+library(textdata) 
+library(ggwordcloud)
+library(dplyr)
+library(ggplot2)
+```
+## Lexicons
+Loading the correct lexicons
+```{r, eval=FALSE}
+get_sentiments(lexicon = "afinn")
+get_sentiments(lexicon = "nrc")
+```
+
+# Tidying up the data
+
+First we need to locate the .pdf-file with Mckay in it. Then we read it using the pdf_text()-function
+After that we create a dataframe, using the tidy logic.
+```{r, eval=FALSE}
+mckay_path <- here("data", "mckay.pdf")
+mckay_text <- pdf_text(mckay_path)
+
+mckay_df <- data.frame(mckay_text) %>% 
+  mutate(full_text = str_split(mckay_text, pattern = '\\n')) %>% 
+  unnest(full_text) %>% 
+  mutate(full_text = str_trim(full_text))
+
+```
+
+Now we want to seperate each chapter in the book, in order see the trends in sentiment evolve during the book.
+First we find a some pieces of text, which occur in every chapter.
+Every chapter starts with an overview with the title "CHAPTER XX Review and Explore"
+Every chapter has a section in the end, which is named "CHAPTER PREVIEW"
+To identify each chapter, i wrote a script with a regular expression, figuring out which rows in the data-set, contains these expressions.
+
+
+```{r, eval=FALSE}
+mckay_df %>% 
+  mutate(linenumber = row_number()) %>% 
+  filter(str_detect(full_text, regex("CHAPTER (\\d|\\d.) Review and Explore|CHAPTER PREVIEW", ignore_case = FALSE)))
+
+```
+
+This identifies a number of rows in the dataset. All the text in between these rows contain acknowledgements, authors and other non-interesting text for the analysis, and alos gets in the way of seperating the chapters, due to there needing to be a common occuring expression in the start, for us to recognize it.
+
+I now manually wrote in the rows that we need to weed out, in order to get the chapters ready for analysis.
+
+```{r, eval=FALSE}
+mckay_clean_df <- mckay_df[-c(1:2785, 4445:4616, 6473:6640, 8195:8346, 
+                              9937:10101, 11805:11965, 13759:13925, 
+                              15588:15744, 17472:17629, 19497:19669, 
+                              21588:21748,23548:23703, 25511:25665, 
+                              27203:27364, 29387:29571, 31508:31677, 
+                              33570:33735, 35437:35604, 37743:37935, 
+                              40098:40284, 42108:42265, 44137:44298, 
+                              46521:46714, 48575:48746, 51013:51179, 
+                              53138:53298, 55093:55259, 57105:57270, 
+                              59481:59665,  61530:61688, 63898:64063, 
+                              66285:66452, 68563:68730, 70328:89168),]
+```
+
+Now we need to recognize the chapters using the common occurring "CHAPTER PREVIEW", from the start of every chapter.
+The we filter out all numeric words, and apply the stopword list.
+
+```{r, eval=FALSE}
+mckay_chapters <- mckay_clean_df %>%
+  mutate(linenumber = row_number(), chapter = cumsum(str_detect(text_full, regex("CHAPTER PREVIEW")))) %>% 
+  ungroup() %>% 
+  unnest_tokens(word,text_full)
+
+mckay_chapters_no_numeric <- mckay_chapters %>% 
+  filter(is.na(as.numeric(word)))
+
+mckay_chapters_stop <- mckay_chapters_no_numeric %>% 
+  anti_join(stop_words) %>% 
+  select(-mckay_text)
+```
+
+We are now ready to analyze the data.
+
+
+# Afinn sentiment analysis
+We are interested in doing a sentiment analysis for every chapter individually.
+This would result in a very long, and very repetitive script, and to avoid this, we can automate this proces using a for-loop.
+
+First we define som dataframes which are used to store the results from the for-loop.
+The the forloop perform a filter for chapter, and use the inner_join()function, summarize the score and store it to the dataframe. This action is then performed for both the mean and the median of the afinn-sentiment score.
+At the end of the loop a number is added to a predfined x-value, in order to raise the chapter number.
+The loop is repeated 33 times, once for each chapter.
+After the loop is completed for all 33 chapters, the three dataframes are combined into one dataframe using the c-bind function.
+
+```{r, eval=FALSE}
+mean_out_df <- data.frame()
+median_out_df <- data.frame()
+chapter_number_out_df <- data.frame()
+
+x <- 1
+for(i in 1:33) {
+  mean_out <- mckay_chapters_stop %>% 
+  filter(chapter == x) %>% 
+    inner_join(get_sentiments("afinn")) %>% 
+      summarize(
+      mean_score = mean(value))
+  mean_df <- data.frame("Mean" = mean_out)
+median_out <- mckay_chapters_stop %>% 
+  filter(chapter == x) %>% 
+    inner_join(get_sentiments("afinn")) %>% 
+      summarize(
+      median_score = median(value))
+  median_df <- data.frame("Median" = median_out)
+  mean_out_df <- bind_rows(mean_out_df, mean_df)
+  median_out_df <- bind_rows(median_out_df, median_df)
+  chapter_number_df <- data.frame("Chapter Number" = x)
+  chapter_number_out_df <- bind_rows(chapter_number_out_df, chapter_number_df)
+  x=x+1
+}
+
+mean_median_df <- cbind(chapter_number_out_df, mean_out_df, median_out_df)
+mean_median_df
+
+```
+
+Now we can visualize the results, which show a tendency for the mean of the sentiment (pr chapter) to decrease towards the end of the book.
+
+```{r, eval=FALSE}
+mean_median_df %>% 
+  ggplot(aes(x=Chapter.Number, y=mean_score))+
+  geom_line(colour = "red")+
+  geom_point()+
+  scale_x_continuous(n.breaks=33)+
+  scale_y_continuous(n.breaks = 10, limits = c(-2, 2))+
+  labs(x= "Chapter", y= "Sentiment Score", title="Sentiment score mean across chapters")
+
+```
+
+# Top used word in every chapter
+Another interesting analysis is looking at the most used words per chapter, and visualizing these in a wordcloud.
+
+This is done using the same principle as the afinn-analysis
+defyning some dataframes, doing a for-loop operation, adding the results, and combining the results in a new dataframe.
+```{r, eval=FALSE}
+top100_words_df <- data.frame()
+chapter_number_y_out_df <- data.frame()
+
+y <- 1
+for(i in 1:33){
+  chapter_top100_out <- mckay_chapters_stop %>%
+    filter(chapter == y) %>% 
+  count(word) %>% 
+  arrange(-n) %>% 
+  head(1)
+  top100_df <- data.frame("Top100 Words" = chapter_top100_out)
+  top100_words_df <- bind_rows(top100_words_df, top100_df)
+  chapter_number_y_df <- data.frame("Chapter Number" = y)
+  chapter_number_y_out_df <- bind_rows(chapter_number_y_out_df, chapter_number_y_df)
+  y = y + 1
+}
+top100_words_final_df <- cbind(chapter_number_y_out_df, top100_words_df)
+top100_words_final_df %>% 
+  arrange(Chapter.Number, desc(Top100.Words.n))
+
+```
+
+This shows that the word "War" is the most used word in multiple chapter, and increases in frequency towards the later chapters.
+
+The words can be visualized in a wordcloud using the ggplot2 package.
+This visualizations show the most used words (defined by the above tabel), in a wordcloud. The size and color, are determined by the times the word is used in the chapter.
+
+```{r, eval=FALSE}
+ggplot(data = top100_words_final_df %>% 
+         filter(Chapter.Number == 1:33), 
+  aes(label = Top100.Words.word, size = Top100.Words.n)) +
+  geom_text_wordcloud_area(aes(color = Top100.Words.n), shape = "diamond") +
+  scale_size_area(max_size = 15) +
+  scale_color_gradientn(colors = c("darkgreen","blue","red")) +
+  theme_minimal()
+```
+
+# NRC - Analysis
+The NRC-analysis is made using the same principle of a for-loop and predefined dataframes, feeding into a combined dataframe af the loop.
+
+All the chapters are analyzed for all the sentiments defined by the NRC-lexicon and fed into the new dataframe in the end.
+
+```{r, eval=FALSE}
+# Data frame definitions for loop
+chapter_number_x_out_df <- data.frame()
+anger_out_df <- data.frame()
+anticipation_out_df <- data.frame()
+disgust_out_df <- data.frame()
+fear_out_df <- data.frame()
+joy_out_df <- data.frame()
+negative_out_df <- data.frame()
+positive_out_df <- data.frame()
+sadness_out_df <- data.frame()
+surprise_out_df <- data.frame()
+trust_out_df <- data.frame()
+x <- 1
+for(i in 1:33){
+mckay_chapters_nrc <- mckay_chapters_stop %>% 
+  filter(chapter == x) %>% 
+  inner_join(get_sentiments("nrc")) %>% 
+  count(sentiment, sort = TRUE)
+
+anger_out <- mckay_chapters_nrc %>% 
+  filter(sentiment == "anger")
+
+  anger_df <- data.frame("anger" = anger_out)
+  anger_out_df <- bind_rows(anger_out_df, anger_df)
+
+anticipation_out <- mckay_chapters_nrc %>% 
+  filter(sentiment == "anticipation")
+
+  anticipation_df <- data.frame("anticipation" = anticipation_out)
+  anticipation_out_df <- bind_rows(anticipation_out_df, anticipation_df)
+
+disgust_out <- mckay_chapters_nrc %>% 
+  filter(sentiment == "disgust")
+
+  disgust_df <- data.frame("disgust" = disgust_out)
+  disgust_out_df <- bind_rows(disgust_out_df, disgust_df)
+
+fear_out <- mckay_chapters_nrc %>% 
+  filter(sentiment == "fear")
+
+  fear_df <- data.frame("fear" = fear_out)
+  fear_out_df <- bind_rows(fear_out_df, fear_df)
+
+joy_out <- mckay_chapters_nrc %>% 
+  filter(sentiment == "joy")
+
+  joy_df <- data.frame("joy" = joy_out)
+  joy_out_df <- bind_rows(joy_out_df, joy_df)
+
+negative_out <- mckay_chapters_nrc %>% 
+  filter(sentiment == "negative")
+
+  negative_df <- data.frame("negative" = negative_out)
+  negative_out_df <- bind_rows(negative_out_df, negative_df)
+
+positive_out <- mckay_chapters_nrc %>% 
+  filter(sentiment == "positive")
+
+  positive_df <- data.frame("positive" = positive_out)
+  positive_out_df <- bind_rows(positive_out_df, positive_df)
+
+sadness_out <- mckay_chapters_nrc %>% 
+  filter(sentiment == "sadness")
+
+  sadness_df <- data.frame("sadness" = sadness_out)
+  sadness_out_df <- bind_rows(sadness_out_df, sadness_df)
+
+surprise_out <- mckay_chapters_nrc %>% 
+  filter(sentiment == "surprise")
+
+  surprise_df <- data.frame("surprise" = surprise_out)
+  surprise_out_df <- bind_rows(surprise_out_df, surprise_df)
+
+trust_out <- mckay_chapters_nrc %>% 
+  filter(sentiment == "trust")
+
+  trust_df <- data.frame("trust" = trust_out)
+  trust_out_df <- bind_rows(trust_out_df, trust_df)
+
+chapter_number_x_df <- data.frame("chapter_number" = x)
+chapter_number_x_out_df <- bind_rows(chapter_number_x_out_df, chapter_number_x_df)
+x = x + 1
+}
+
+mckay_chapters_nrc <- cbind(chapter_number_x_out_df,
+                            anger_out_df[,2,drop=FALSE],
+                            anticipation_out_df[,2,drop=FALSE],
+                            disgust_out_df[,2,drop=FALSE],
+                            fear_out_df[,2,drop=FALSE],
+                            joy_out_df[,2,drop=FALSE],
+                            negative_out_df[,2,drop=FALSE],
+                            positive_out_df[,2,drop=FALSE],
+                            sadness_out_df[,2,drop=FALSE],
+                            surprise_out_df[,2,drop=FALSE],
+                            trust_out_df[,2,drop=FALSE])
+
+mckay_chapters_nrc
+
+```
+
+We can now plot all the sentiments development through the chapters. Using a linediagram from the ggplot2 package.
+
+```{r, eval=FALSE}
+ggplot(mckay_chapters_nrc)+
+  geom_line(aes(x=chapter_number, y=anger.n), colour = "darkgreen")+
+  geom_line(aes(x=chapter_number,y=anticipation.n), colour = "green")+
+  geom_line(aes(x=chapter_number,y=disgust.n), colour = "brown")+
+  geom_line(aes(x=chapter_number, y=fear.n), colour = "darkred")+
+  geom_line(aes(x=chapter_number, y=joy.n), colour = "yellow")+
+  geom_line(aes(x=chapter_number, y=negative.n), colour = "blue")+
+  geom_line(aes(x=chapter_number, y=positive.n), colour = "red")+
+  geom_line(aes(x=chapter_number, y=sadness.n), colour = "black")+
+  geom_line(aes(x=chapter_number, y=surprise.n), colour = "purple")+
+  geom_line(aes(x=chapter_number, y=trust.n), colour = "lightblue")+
+  scale_x_continuous(n.breaks=33)+
+  scale_y_continuous(n.breaks = 10, limits = c(0, 1300))+
+  labs(x= "Chapter Number", y= "NRC Score", title="NRC Analysis across chapters")
+
+```
+However, this visualization is a complete mess, so it makes sense to look at the different sentiments individually we can spot trends in the developments in each of them, and look at how they correspond to the development of the afinn-sentiment
+
+
+All these are plottet using the ggplot2-package line diagram, and the operation is the same for alle sentiments.
+```{r, eval=FALSE}
+ggplot(mckay_chapters_nrc)+
+  geom_line(aes(x=chapter_number, y=anger.n), colour = "darkgreen")+
+  scale_x_continuous(n.breaks=33)+
+  scale_y_continuous(n.breaks = 10, limits = c(0, 600))+
+  labs(x= "Chapter Number", y= "NRC Score", title="Anger (NRC Analysis across chapters)")
+```
+
+```{r, eval=FALSE}
+ggplot(mckay_chapters_nrc)+
+  geom_line(aes(x=chapter_number,y=anticipation.n), colour = "green")+
+  scale_x_continuous(n.breaks=33)+
+  scale_y_continuous(n.breaks = 10, limits = c(0, 600))+
+  labs(x= "Chapter Number", y= "NRC Score", title="Anticipation (NRC Analysis across chapters)")
+
+
+```
+
+
+```{r, eval=FALSE}
+ggplot(mckay_chapters_nrc)+
+  geom_line(aes(x=chapter_number,y=disgust.n), colour = "brown")+
+  scale_x_continuous(n.breaks=33)+
+  scale_y_continuous(n.breaks = 10, limits = c(0, 600))+
+  labs(x= "Chapter Number", y= "NRC Score", title="Disgust (NRC Analysis across chapters)")
+```
+
+
+```{r, eval=FALSE}
+ggplot(mckay_chapters_nrc)+
+  geom_line(aes(x=chapter_number, y=fear.n), colour = "darkred")+
+  scale_x_continuous(n.breaks=33)+
+  scale_y_continuous(n.breaks = 10, limits = c(0, 800))+
+  labs(x= "Chapter Number", y= "NRC Score", title="Fear (NRC Analysis across chapters)")
+```
+
+
+```{r, eval=FALSE}
+ggplot(mckay_chapters_nrc)+
+  geom_line(aes(x=chapter_number, y=joy.n), colour = "orange")+
+  scale_x_continuous(n.breaks=33)+
+  scale_y_continuous(n.breaks = 10, limits = c(0, 500))+
+  labs(x= "Chapter Number", y= "NRC Score", title="Joy (NRC Analysis across chapters)")
+```
+
+
+```{r, eval=FALSE}
+ggplot(mckay_chapters_nrc)+
+  geom_line(aes(x=chapter_number, y=negative.n), colour = "blue")+
+  scale_x_continuous(n.breaks=33)+
+  scale_y_continuous(n.breaks = 10, limits = c(0, 1100))+
+  labs(x= "Chapter Number", y= "NRC Score", title="Negative (NRC Analysis across chapters)")
+```
+
+```{r, eval=FALSE}
+ggplot(mckay_chapters_nrc)+
+  geom_line(aes(x=chapter_number, y=positive.n), colour = "red")+
+  scale_x_continuous(n.breaks=33)+
+  scale_y_continuous(n.breaks = 10, limits = c(0, 1300))+
+  labs(x= "Chapter Number", y= "NRC Score", title="Positive (NRC Analysis across chapters)")
+
+```
+
+
+```{r, eval=FALSE}
+ggplot(mckay_chapters_nrc)+
+  geom_line(aes(x=chapter_number, y=sadness.n), colour = "black")+
+  scale_x_continuous(n.breaks=33)+
+  scale_y_continuous(n.breaks = 10, limits = c(0, 500))+
+  labs(x= "Chapter Number", y= "NRC Score", title="Sadness (NRC Analysis across chapters)")
+
+```
+
+
+```{r, eval=FALSE}
+ggplot(mckay_chapters_nrc)+
+  geom_line(aes(x=chapter_number, y=surprise.n), colour = "purple")+
+  scale_x_continuous(n.breaks=33)+
+  scale_y_continuous(n.breaks = 10, limits = c(0, 300))+
+  labs(x= "Chapter Number", y= "NRC Score", title="Suprise (NRC Analysis across chapters)")
+```
+
+```{r, eval=FALSE}
+ggplot(mckay_chapters_nrc)+
+  geom_line(aes(x=chapter_number, y=trust.n), colour = "lightblue")+
+  scale_x_continuous(n.breaks=33)+
+  scale_y_continuous(n.breaks = 10, limits = c(0, 900))+
+  labs(x= "Chapter Number", y= "NRC Score", title="Trust (NRC Analysis across chapters)")
+
+```
+
+
+# Session information
+
+```{r}
+sessionInfo()
+```
+
